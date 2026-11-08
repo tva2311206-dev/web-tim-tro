@@ -1,0 +1,130 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int       @id @default(autoincrement())
+  fullName    String
+  email       String    @unique
+  phone       String?
+  password    String
+  role        Role      @default(USER)
+  avatar      String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  rooms       Room[]    @relation("OwnerRooms")
+  favorites   Favorite[]
+  bookings    Booking[]
+  reports     Report[]
+}
+
+model Room {
+  id              Int           @id @default(autoincrement())
+  title           String
+  description     String        @db.Text
+  roomType        RoomType      @default(PHONG_TRO)
+  price           Int
+  area            Float
+  address         String
+  district        String
+  city            String
+  ward            String?
+  lat             Float?
+  lng             Float?
+  maxOccupants    Int           @default(2)
+  electricPrice   Int           @default(3500)
+  waterPrice      Int           @default(15000)
+  internetPrice   Int           @default(100000)
+  status          RoomStatus    @default(PENDING)
+  images          String        @db.Text
+  amenities       String        @db.Text
+  contactPhone    String
+  ownerId         Int
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  owner           User          @relation("OwnerRooms", fields: [ownerId], references: [id])
+  favorites       Favorite[]
+  bookings        Booking[]
+  reports         Report[]
+}
+
+model Favorite {
+  id        Int     @id @default(autoincrement())
+  userId    Int
+  roomId    Int
+  createdAt DateTime @default(now())
+
+  user      User    @relation(fields: [userId], references: [id])
+  room      Room    @relation(fields: [roomId], references: [id])
+
+  @@unique([userId, roomId])
+}
+
+model Booking {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  roomId      Int
+  message     String?
+  status      BookingStatus @default(PENDING)
+  visitDate   DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id])
+  room        Room          @relation(fields: [roomId], references: [id])
+}
+
+model Report {
+  id          Int           @id @default(autoincrement())
+  userId      Int
+  roomId      Int
+  reason      String
+  description String?       @db.Text
+  status      ReportStatus  @default(PENDING)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id])
+  room        Room          @relation(fields: [roomId], references: [id])
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum RoomType {
+  PHONG_TRO
+  CAN_HO_MINI
+  CHUNG_CU
+  STUDIO
+  NHAT_CAN
+}
+
+enum RoomStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+enum ReportStatus {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
