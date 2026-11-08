@@ -101,6 +101,19 @@ export const AMENITIES_LIST = [
   'Camera', 'Hầm xe', 'View đẹp',
 ]
 
+export function removeVietnameseTones(str) {
+  if (!str) return '';
+  str = String(str).toLowerCase().trim();
+  str = str.replace(/à|á|ạ|ả|ã|â|ầ|ấ|ậ|ẩ|ẫ|ă|ằ|ắ|ặ|ẳ|ẵ/g, 'a');
+  str = str.replace(/è|é|ẹ|ẻ|ẽ|ê|ề|ế|ệ|ể|ễ/g, 'e');
+  str = str.replace(/ì|í|ị|ỉ|ĩ/g, 'i');
+  str = str.replace(/ò|ó|ọ|ỏ|õ|ô|ồ|ố|ộ|ổ|ỗ|ơ|ờ|ớ|ợ|ở|ỡ/g, 'o');
+  str = str.replace(/ù|ú|ụ|ủ|ũ|ư|ừ|ứ|ự|ử|ữ/g, 'u');
+  str = str.replace(/ỳ|ý|ỵ|ỷ|ỹ/g, 'y');
+  str = str.replace(/đ/g, 'd');
+  return str;
+}
+
 export const PRICE_RANGES = [
   { label: 'Tất cả', min: 0, max: 0 },
   { label: 'Dưới 2 triệu', min: 0, max: 2_000_000 },

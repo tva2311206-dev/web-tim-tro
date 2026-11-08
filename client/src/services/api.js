@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { useAuthStore } from '../store/authStore';
 import { MOCK_ROOMS } from './mockData';
+import { aiAnalyzeAndMatchRooms } from '../utils/aiMatcher';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -436,50 +437,19 @@ export const aiApi = {
     try {
       return await api.post('/ai/search', { query });
     } catch (err) {
-      // Mock AI search logic
-      const lower = query.toLowerCase();
-      let rooms = getLocalRooms().filter(r => r.status === 'APPROVED');
-
-      let maxPrice = null;
-      let minPrice = null;
-      const pMatch = lower.match(/dưới\s*([\d,\.]+)\s*(triệu|tr)/);
-      if (pMatch) maxPrice = parseFloat(pMatch[1].replace(',', '.')) * 1000000;
-
-      const pFromMatch = lower.match(/từ\s*([\d,\.]+)\s*(triệu|tr)/);
-      if (pFromMatch) minPrice = parseFloat(pFromMatch[1].replace(',', '.')) * 1000000;
-
-      if (maxPrice) rooms = rooms.filter(r => r.price <= maxPrice);
-      if (minPrice) rooms = rooms.filter(r => r.price >= minPrice);
-
-      let detectedCity = null;
-      if (lower.includes('hà nội')) { detectedCity = 'Hà Nội'; rooms = rooms.filter(r => r.city === 'Hà Nội'); }
-      else if (lower.includes('hồ chí minh') || lower.includes('tp.hcm') || lower.includes('sài gòn')) {
-        detectedCity = 'TP. Hồ Chí Minh';
-        rooms = rooms.filter(r => r.city === 'TP. Hồ Chí Minh');
-      } else if (lower.includes('đà nẵng')) {
-        detectedCity = 'Đà Nẵng';
-        rooms = rooms.filter(r => r.city === 'Đà Nẵng');
-      }
-
-      if (lower.includes('mật mã') || lower.includes('cầu giấy')) {
-        rooms = rooms.filter(r => r.district === 'Cầu Giấy' || r.title.toLowerCase().includes('mật mã'));
-      }
-
-      const results = rooms.slice(0, 6);
-
-      const msg = `🤖 **YouRoom AI đã phân tích yêu cầu của bạn:**\n` +
-        `• Ngân sách: ${maxPrice ? `Dưới ${(maxPrice / 1000000).toFixed(1)} triệu/tháng` : 'Linh hoạt'}\n` +
-        `• Khu vực: ${detectedCity || 'Đang mở rộng toàn quốc'}\n` +
-        `• Tìm thấy **${results.length} phòng trọ** thực tế phù hợp trong cơ sở dữ liệu.`;
+      // Sử dụng Bộ phân tích NLP & Chấm điểm tương thích thông minh
+      const allRooms = getLocalRooms();
+      const analysis = aiAnalyzeAndMatchRooms(query, allRooms);
 
       return {
         data: {
           success: true,
           data: {
-            message: msg,
-            rooms: results,
+            message: analysis.message,
+            filters: analysis.filters,
+            rooms: analysis.matchedRooms,
             isDemo: true,
-            note: 'Chế độ Demo – AI đang phân tích dữ liệu phòng mẫu có sẵn.',
+            note: 'Chế độ YouRoom AI – Đã phân tích ngôn ngữ tự nhiên và truy vấn dữ liệu phòng thực tế.',
           },
         },
       };
@@ -490,12 +460,12 @@ export const aiApi = {
     try {
       return await api.post('/ai/describe', data);
     } catch (err) {
-      const desc = `Phòng trọ cho thuê tại ${data.address || ''}, ${data.city || 'Hà Nội'}. ` +
-        `Diện tích ${data.area || 25}m2 thông thoáng, sạch sẽ, đón ánh sáng tự nhiên. ` +
-        `Nội thất và tiện ích đi kèm: ${(data.amenities || []).join(', ') || 'Đầy đủ tiện ích cơ bản'}. ` +
-        `Giá điện ${data.electricPrice || 3500}đ/kWh, nước ${data.waterPrice || 20000}đ/khối. ` +
-        `Giá thuê cực tốt chỉ ${(Number(data.price || 0) / 1000000).toFixed(1)} triệu/tháng. ` +
-        `Giờ giấc tự do, an ninh đảm bảo. Vui lòng liên hệ trực tiếp số điện thoại ${data.contactPhone || ''} để xem phòng miễn phí!`;
+      const desc = `Cho thuê ${data.title || 'phòng trọ'} tại vị trí đắc địa ${data.address || ''}, ${data.district ? data.district + ', ' : ''}${data.city || 'Hà Nội'}.\n\n` +
+        `• Diện tích: ${data.area || 25} m² thông thoáng, sạch sẽ, đón ánh sáng tự nhiên.\n` +
+        `• Tiện ích trang bị sẵn: ${(data.amenities || []).join(', ') || 'Đầy đủ tiện ích cơ bản, nhà vệ sinh riêng, bình nóng lạnh, chỗ để xe rộng rãi'}.\n` +
+        `• Chi phí dịch vụ minh bạch: Điện ${data.electricPrice || 3500} đ/kWh, nước ${data.waterPrice || 20000} đ/khối.\n` +
+        `• Giá thuê cực tốt: ${(Number(data.price || 0) / 1_000_000).toFixed(1)} triệu/tháng.\n` +
+        `• An ninh đảm bảo, giờ giấc tự do không chung chủ. Vui lòng liên hệ số ${data.contactPhone || 'chủ nhà'} để xem phòng miễn phí!`;
       return {
         data: {
           success: true,
@@ -517,15 +487,37 @@ export const aiApi = {
       let reply = '';
       let suggestedRooms = [];
 
-      if (lower.includes('tìm phòng') || lower.includes('triệu') || lower.includes('ở ghép') || lower.includes('gần')) {
-        suggestedRooms = getLocalRooms().filter(r => r.status === 'APPROVED').slice(0, 3);
-        reply = `Tôi đã tìm thấy **${suggestedRooms.length} phòng phù hợp** với mong muốn của bạn. Hãy xem danh sách đề xuất bên dưới nhé! Bạn có muốn tôi lọc kỹ hơn theo tiện ích nào không?`;
-      } else if (lower.includes('đăng tin') || lower.includes('cho thuê')) {
-        reply = `Để đăng tin cho thuê phòng:\n1. Bấm nút **"Đăng tin miễn phí"** ở góc phải thanh menu\n2. Nhập thông tin phòng, tiện ích và giá điện nước\n3. Bấm **"AI viết mô tả giúp tôi"** để tự động tạo bài viết chuyên nghiệp\n4. Tải ảnh lên và bấm Gửi duyệt. Tin của bạn sẽ được kiểm duyệt nhanh trong vòng 24h!`;
-      } else if (lower.includes('giá') || lower.includes('chi phí')) {
-        reply = `Giá thuê phòng trọ hiện nay phổ biến ở các mức:\n• **1.5 - 2.5 triệu**: Phòng trọ cơ bản cho sinh viên\n• **2.5 - 4.0 triệu**: Phòng khép kín, có điều hòa, ban công\n• **4.0 - 6.0 triệu**: Studio, Căn hộ mini full nội thất cao cấp`;
+      // Kiểm tra xem câu hỏi có ý định tìm phòng không
+      const isFindingRoom = 
+        lower.includes('phòng') || lower.includes('tro') || lower.includes('trọ') ||
+        lower.includes('tìm') || lower.includes('tim') || lower.includes('thuê') || lower.includes('thue') ||
+        lower.includes('ở') || lower.includes('o') || lower.includes('triệu') || lower.includes('tr') ||
+        lower.includes('gần') || lower.includes('gan') || lower.includes('ngân sách') || lower.includes('studio') ||
+        lower.includes('căn hộ') || lower.includes('mini');
+
+      if (isFindingRoom) {
+        const allRooms = getLocalRooms();
+        const analysis = aiAnalyzeAndMatchRooms(message, allRooms);
+        suggestedRooms = analysis.matchedRooms;
+        reply = analysis.message;
+      } else if (lower.includes('đăng tin') || lower.includes('cho thuê') || lower.includes('chủ nhà') || lower.includes('chủ trọ')) {
+        reply = `Để đăng tin cho thuê phòng trên YouRoom AI:\n` +
+          `1. Nhấn nút **"Đăng tin miễn phí"** ở góc phải thanh menu.\n` +
+          `2. Điền thông tin phòng, tiện ích và giá điện nước.\n` +
+          `3. Sử dụng nút **"AI viết mô tả giúp tôi"** để tạo nội dung chuyên nghiệp tự động.\n` +
+          `4. Tải ảnh lên và bấm Gửi duyệt. Tin đăng của bạn sẽ được kiểm duyệt nhanh trong vòng 24h!`;
+      } else if (lower.includes('giá') || lower.includes('chi phí') || lower.includes('tiền')) {
+        reply = `Giá thuê phòng trọ hiện nay phổ biến ở các mức:\n` +
+          `• **1.5 - 2.5 triệu/tháng**: Phòng trọ cơ bản cho sinh viên, diện tích 15-20m².\n` +
+          `• **2.5 - 4.0 triệu/tháng**: Phòng khép kín, có điều hòa, ban công, nóng lạnh, an ninh tốt.\n` +
+          `• **4.0 - 6.0 triệu/tháng**: Studio, Căn hộ mini full nội thất cao cấp (máy giặt, tủ lạnh, bếp riêng).\n\n` +
+          `Bạn đang có ngân sách khoảng bao nhiêu để tôi tìm phòng chính xác cho bạn?`;
       } else {
-        reply = `Xin chào! Tôi là trợ lý ảo **YouRoom AI** 🏠. Bạn có thể cho tôi biết khu vực, tầm giá và các tiện ích mong muốn (ví dụ: *"Tìm phòng dưới 3 triệu gần Cầu Giấy có điều hòa"*), tôi sẽ truy vấn dữ liệu phòng thực tế ngay cho bạn!`;
+        reply = `Xin chào! Tôi là trợ lý ảo **YouRoom AI** 🏠.\n\n` +
+          `Tôi có thể phân tích nhu cầu và tìm phòng trọ thực tế cho bạn. Bạn chỉ cần mô tả tự nhiên, ví dụ:\n` +
+          `• *"Tìm phòng dưới 2.5 triệu gần Học viện Kỹ thuật Mật mã có điều hòa"*\n` +
+          `• *"Cần thuê căn hộ mini có máy giặt tại Hà Đông tầm 3 đến 4 triệu"*\n` +
+          `• *"Tìm phòng trọ giá rẻ dưới 2 triệu ở Cầu Giấy"*`;
       }
 
       return {

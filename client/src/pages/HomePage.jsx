@@ -188,10 +188,17 @@ export default function HomePage() {
     setIsDemo(false)
     try {
       const res = await aiApi.search(q)
-      const data = res.data
-      setAiResults(data?.rooms || data?.data || [])
-      setAiMessage(data?.message || data?.aiMessage || '')
-      if (data?.isDemo || data?.provider === 'mock') setIsDemo(true)
+      const resPayload = res.data?.data || res.data || {}
+      const roomsList = Array.isArray(resPayload.rooms)
+        ? resPayload.rooms
+        : (Array.isArray(resPayload) ? resPayload : [])
+      const messageText = resPayload.message || res.data?.message || ''
+
+      setAiResults(roomsList)
+      setAiMessage(messageText)
+      if (resPayload.isDemo || resPayload.provider === 'mock' || !resPayload.isRealAI) {
+        setIsDemo(true)
+      }
       // Scroll to results
       setTimeout(() => {
         aiResultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })

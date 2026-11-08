@@ -4,86 +4,380 @@ import prisma from '../prisma.js';
 const router = express.Router();
 
 /**
- * Phân tích câu truy vấn tiếng Việt thành các tiêu chí lọc
+ * Xóa dấu tiếng Việt
+ */
+function removeVietnameseTones(str) {
+  if (!str) return '';
+  str = str.toLowerCase();
+  str = str.replace(/à|á|ạ|ả|ã|â|ầ|ấ|ậ|ẩ|ẫ|ă|ằ|ắ|ặ|ẳ|ẵ/g, 'a');
+  str = str.replace(/è|é|ẹ|ẻ|ẽ|ê|ề|ế|ệ|ể|ễ/g, 'e');
+  str = str.replace(/ì|í|ị|ỉ|ĩ/g, 'i');
+  str = str.replace(/ò|ó|ọ|ỏ|õ|ô|ồ|ố|ộ|ổ|ỗ|ơ|ờ|ớ|ợ|ở|ỡ/g, 'o');
+  str = str.replace(/ù|ú|ụ|ủ|ũ|ư|ừ|ứ|ự|ử|ữ/g, 'u');
+  str = str.replace(/ỳ|ý|ỵ|ỷ|ỹ/g, 'y');
+  str = str.replace(/đ/g, 'd');
+  str = str.replace(/\u0300|\u0301|\u0303|\u0309|\u0323/g, '');
+  str = str.replace(/\u02C6|\u0306|\u031B/g, '');
+  return str.trim();
+}
+
+/**
+ * Phân tích câu truy vấn tiếng Việt thành các tiêu chí lọc thông minh
  */
 function parseQueryToFilters(query) {
-  const filters = {};
-  const lowerQuery = query.toLowerCase();
+  if (!query) return {};
+  const rawLower = query.toLowerCase().trim();
+  const lower = removeVietnameseTones(rawLower);
 
-  // Mức giá trần (dưới / khoảng)
-  const priceMaxMatch = lowerQuery.match(/(?:dưới|tối đa|<|nhỏ hơn)\s*([\d,\.]+)\s*(triệu|tr|đồng|vnđ)?/);
-  if (priceMaxMatch) {
-    let p = parseFloat(priceMaxMatch[1].replace(',', '.'));
-    if (!priceMaxMatch[2] || priceMaxMatch[2].includes('triệu') || priceMaxMatch[2].includes('tr')) {
-      p = p * 1_000_000;
+  const filters = {
+    maxPrice: null,
+    minPrice: null,
+    targetPrice: null,
+    city: null,
+    district: null,
+    school: null,
+    roomType: null,
+    occupants: null,
+    isStudentOrNearUniversity: false,
+    hasBalcony: false,
+    isFullFurniture: false,
+    amenities: [],
+  };
+
+  // 1. Phân tích Giá (2tr5, 2.5 triệu, dưới 3 triệu, từ 2 đến 3tr, ngân sách 2.5tr...)
+  const splitTrMatch = rawLower.match(/(\d+)\s*(?:tr|trieu|triệu)\s*(\d+)/i);
+  if (splitTrMatch) {
+    const main = parseFloat(splitTrMatch[1]);
+    const sub = parseFloat(splitTrMatch[2]);
+    filters.targetPrice = (main + sub / 10) * 1_000_000;
+    filters.maxPrice = filters.targetPrice * 1.15;
+  }
+
+  const rangeMatch = rawLower.match(/(?:từ|tu)\s*([\d,\.]+)\s*(?:đến|den|-)\s*([\d,\.]+)\s*(?:tr|trieu|triệu|k)?/i);
+  if (rangeMatch) {
+    const p1 = parseFloat(rangeMatch[1].replace(',', '.'));
+    const p2 = parseFloat(rangeMatch[2].replace(',', '.'));
+    filters.minPrice = p1 > 100 ? p1 * 1000 : p1 * 1_000_000;
+    filters.maxPrice = p2 > 100 ? p2 * 1000 : p2 * 1_000_000;
+  }
+
+  if (!filters.maxPrice) {
+    const maxMatch = rawLower.match(/(?:dưới|duoi|tối đa|toi da|<|nhỏ hơn|nho hon|dưới tầm|dưới khoảng)\s*([\d,\.]+)\s*(?:tr|trieu|triệu|k)?/i);
+    if (maxMatch) {
+      const val = parseFloat(maxMatch[1].replace(',', '.'));
+      filters.maxPrice = val > 100 ? val * 1000 : val * 1_000_000;
     }
-    filters.maxPrice = p;
   }
 
-  // Mức giá sàn (từ / trên)
-  const priceMinMatch = lowerQuery.match(/(?:từ|trên|>|lớn hơn)\s*([\d,\.]+)\s*(triệu|tr)/);
-  if (priceMinMatch) {
-    filters.minPrice = parseFloat(priceMinMatch[1].replace(',', '.')) * 1_000_000;
-  }
-
-  // Thành phố
-  if (lowerQuery.includes('hà nội') || lowerQuery.includes('ha noi')) filters.city = 'Hà Nội';
-  else if (lowerQuery.includes('tp.hcm') || lowerQuery.includes('hồ chí minh') || lowerQuery.includes('sài gòn')) filters.city = 'TP. Hồ Chí Minh';
-  else if (lowerQuery.includes('đà nẵng') || lowerQuery.includes('da nang')) filters.city = 'Đà Nẵng';
-
-  // Quận / Huyện phổ biến
-  const districts = ['Cầu Giấy', 'Thanh Xuân', 'Đống Đa', 'Hà Đông', 'Ba Đình', 'Nam Từ Liêm', 'Hai Bà Trưng', 'Hoàn Kiếm', 'Hoàng Mai', 'Bình Thạnh', 'Quận 1', 'Hải Châu', 'Sơn Trà'];
-  for (const d of districts) {
-    if (lowerQuery.includes(d.toLowerCase())) {
-      filters.district = d;
-      break;
+  if (!filters.minPrice) {
+    const minMatch = rawLower.match(/(?:từ|tu|trên|tren|>|lớn hơn|lon hon)\s*([\d,\.]+)\s*(?:tr|trieu|triệu|k)?/i);
+    if (minMatch) {
+      const val = parseFloat(minMatch[1].replace(',', '.'));
+      filters.minPrice = val > 100 ? val * 1000 : val * 1_000_000;
     }
   }
 
-  // Trường học
-  if (lowerQuery.includes('mật mã') || lowerQuery.includes('kỹ thuật mật mã') || lowerQuery.includes('act')) {
+  if (!filters.maxPrice && !filters.targetPrice) {
+    const targetMatch = rawLower.match(/(?:ngân sách|ngan sach|tầm|tam|khoảng|khoang|giá|gia)\s*([\d,\.]+)\s*(?:tr|trieu|triệu|k)?/i);
+    if (targetMatch) {
+      const val = parseFloat(targetMatch[1].replace(',', '.'));
+      filters.targetPrice = val > 100 ? val * 1000 : val * 1_000_000;
+      filters.maxPrice = filters.targetPrice * 1.15;
+      filters.minPrice = filters.targetPrice * 0.65;
+    }
+  }
+
+  if (!filters.maxPrice && !filters.targetPrice) {
+    const singleMatch = rawLower.match(/(?:phòng|tro|trọ)\s*([\d,\.]+)\s*(?:tr|trieu|triệu)/i);
+    if (singleMatch) {
+      const val = parseFloat(singleMatch[1].replace(',', '.'));
+      filters.targetPrice = val * 1_000_000;
+      filters.maxPrice = filters.targetPrice * 1.15;
+    }
+  }
+
+  if (lower.includes('gia re') || lower.includes('tiet kiem') || lower.includes('re')) {
+    if (!filters.maxPrice) filters.maxPrice = 2500000;
+  }
+
+  // 2. Phân tích Thành phố
+  if (lower.includes('ha noi') || lower.includes('hn')) {
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('ho chi minh') || lower.includes('tp hcm') || lower.includes('tphcm') || lower.includes('sai gon') || lower.includes('q1') || lower.includes('quan 1')) {
+    filters.city = 'TP. Hồ Chí Minh';
+  } else if (lower.includes('da nang') || lower.includes('dn')) {
+    filters.city = 'Đà Nẵng';
+  }
+
+  // 3. Phân tích Trường học & Khu vực
+  if (lower.includes('mat ma') || lower.includes('ky thuat mat ma') || lower.includes('kma') || lower.includes('act')) {
     filters.school = 'Học viện Kỹ thuật Mật mã';
     filters.district = 'Cầu Giấy';
-  } else if (lowerQuery.includes('quốc gia') || lowerQuery.includes('vnu')) {
-    filters.school = 'Đại học Quốc gia';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('quoc gia') || lower.includes('vnu') || lower.includes('su pham') || lower.includes('bao chi') || lower.includes('xuan thuy')) {
+    filters.school = 'ĐH Quốc Gia / Sư Phạm';
     filters.district = 'Cầu Giấy';
-  } else if (lowerQuery.includes('bách khoa') || lowerQuery.includes('hust')) {
-    filters.school = 'Đại học Bách Khoa';
-    filters.district = 'Hai Bà Trưng';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('bach khoa da nang')) {
+    filters.school = 'ĐH Bách Khoa Đà Nẵng';
+    filters.district = 'Hải Châu';
+    filters.city = 'Đà Nẵng';
+  } else if (lower.includes('bach khoa') || lower.includes('kinh te quoc dan') || lower.includes('xay dung') || lower.includes('bach mai')) {
+    filters.school = 'Bách Khoa / Bạch Mai';
+    filters.district = 'Đống Đa';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('ngoai thuong') || lower.includes('ngoai giao') || lower.includes('chua lang')) {
+    filters.school = 'ĐH Ngoại Thương';
+    filters.district = 'Đống Đa';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('sinh vien') || lower.includes('gan truong') || lower.includes('truong hoc') || lower.includes('dai hoc') || lower.includes('hoc vien')) {
+    filters.isStudentOrNearUniversity = true;
+    if (!filters.city) filters.city = 'Hà Nội';
   }
 
-  // Loại phòng
-  if (lowerQuery.includes('căn hộ mini') || lowerQuery.includes('can ho mini')) filters.roomType = 'CAN_HO_MINI';
-  else if (lowerQuery.includes('studio')) filters.roomType = 'STUDIO';
-  else if (lowerQuery.includes('chung cư') || lowerQuery.includes('chung cu')) filters.roomType = 'CHUNG_CU';
+  if (lower.includes('cau giay')) {
+    filters.district = 'Cầu Giấy';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('thanh xuan') || lower.includes('nguyen trai')) {
+    filters.district = 'Thanh Xuân';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('dong da') || lower.includes('chua boc') || lower.includes('thai ha')) {
+    filters.district = 'Đống Đa';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('ha dong') || lower.includes('quang trung') || lower.includes('van quan')) {
+    filters.district = 'Hà Đông';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('my dinh') || lower.includes('nam tu liem')) {
+    filters.district = 'Nam Từ Liêm';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('ba dinh') || lower.includes('truc bach')) {
+    filters.district = 'Ba Đình';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('hai ba trung')) {
+    filters.district = 'Hai Bà Trưng';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('hoan kiem')) {
+    filters.district = 'Hoàn Kiếm';
+    filters.city = 'Hà Nội';
+  } else if (lower.includes('binh thanh')) {
+    filters.district = 'Bình Thạnh';
+    filters.city = 'TP. Hồ Chí Minh';
+  } else if (lower.includes('son tra') || lower.includes('my khe')) {
+    filters.district = 'Sơn Trà';
+    filters.city = 'Đà Nẵng';
+  } else if (lower.includes('hai chau')) {
+    filters.district = 'Hải Châu';
+    filters.city = 'Đà Nẵng';
+  }
 
-  // Tiện ích
-  const amenitiesList = [];
-  if (lowerQuery.includes('điều hòa') || lowerQuery.includes('máy lạnh')) amenitiesList.push('Điều hòa');
-  if (lowerQuery.includes('máy giặt')) amenitiesList.push('Máy giặt');
-  if (lowerQuery.includes('tủ lạnh')) amenitiesList.push('Tủ lạnh');
-  if (lowerQuery.includes('nóng lạnh') || lowerQuery.includes('bình nóng lạnh')) amenitiesList.push('Nóng lạnh');
-  if (lowerQuery.includes('ban công')) amenitiesList.push('Ban công');
-  if (lowerQuery.includes('vệ sinh riêng') || lowerQuery.includes('khép kín') || lowerQuery.includes('toilet riêng')) amenitiesList.push('Nhà VS riêng');
-  if (lowerQuery.includes('để xe') || lowerQuery.includes('chỗ để xe') || lowerQuery.includes('hầm xe')) amenitiesList.push('Chỗ để xe');
-  if (lowerQuery.includes('thang máy')) amenitiesList.push('Thang máy');
+  // 4. Loại phòng
+  if (lower.includes('studio')) {
+    filters.roomType = 'STUDIO';
+  } else if (lower.includes('can ho mini') || lower.includes('chung cu mini') || lower.includes('mini')) {
+    filters.roomType = 'CAN_HO_MINI';
+  } else if (lower.includes('chung cu')) {
+    filters.roomType = 'CHUNG_CU';
+  } else if (lower.includes('phong tro') || lower.includes('nha tro') || lower.includes('o ghep')) {
+    filters.roomType = 'PHONG_TRO';
+  }
 
-  if (amenitiesList.length > 0) filters.amenities = amenitiesList;
+  // 5. Số người ở & Tiện ích đặc biệt
+  if (lower.includes('2 nguoi') || lower.includes('hai nguoi') || lower.includes('cho 2') || lower.includes('o 2') || lower.includes('2 ban')) {
+    filters.occupants = 2;
+  } else if (lower.includes('1 nguoi') || lower.includes('mot nguoi') || lower.includes('o 1')) {
+    filters.occupants = 1;
+  } else if (lower.includes('3 nguoi') || lower.includes('ba nguoi')) {
+    filters.occupants = 3;
+  }
 
-  // Sức chứa
-  const occMatch = lowerQuery.match(/(\d+)\s*người/);
-  if (occMatch) filters.maxOccupants = parseInt(occMatch[1]);
+  if (lower.includes('ban cong')) filters.hasBalcony = true;
+  if (lower.includes('full noi that') || lower.includes('day du noi that') || lower.includes('noi that')) filters.isFullFurniture = true;
+
+  const amPatterns = [
+    { key: 'dieu hoa', val: 'Điều hòa' },
+    { key: 'may lanh', val: 'Điều hòa' },
+    { key: 'may giat', val: 'Máy giặt' },
+    { key: 'tu lanh', val: 'Tủ lạnh' },
+    { key: 'nong lanh', val: 'Nóng lạnh' },
+    { key: 'ban cong', val: 'Ban công' },
+    { key: 've sinh rieng', val: 'Nhà VS riêng' },
+    { key: 'khep kin', val: 'Nhà VS riêng' },
+    { key: 'toilet rieng', val: 'Nhà VS riêng' },
+    { key: 'nhà vs rieng', val: 'Nhà VS riêng' },
+    { key: 'de xe', val: 'Chỗ để xe' },
+    { key: 'cho de xe', val: 'Chỗ để xe' },
+    { key: 'thang may', val: 'Thang máy' },
+    { key: 'bep', val: 'Bếp mini' },
+    { key: 'giuong', val: 'Giường' },
+    { key: 'tu quan ao', val: 'Tủ quần áo' },
+    { key: 'wifi', val: 'Wifi' },
+  ];
+
+  for (const item of amPatterns) {
+    if (lower.includes(item.key) && !filters.amenities.includes(item.val)) {
+      filters.amenities.push(item.val);
+    }
+  }
 
   return filters;
 }
 
 /**
- * Gọi Google Gemini API thật sự nếu có API Key
+ * Thuật toán xếp hạng phòng thông minh theo điểm tương thích
+ */
+function rankRooms(rooms, filters) {
+  const scored = rooms.map(room => {
+    let score = 0;
+    const matchReasons = [];
+
+    const rCityNorm = removeVietnameseTones(room.city || '');
+    const rDistNorm = removeVietnameseTones(room.district || '');
+    const rTitleNorm = removeVietnameseTones(room.title || '');
+    const rDescNorm = removeVietnameseTones(room.description || '');
+    const rAddrNorm = removeVietnameseTones(room.address || '');
+    const rAmenities = Array.isArray(room.amenities)
+      ? room.amenities
+      : (typeof room.amenities === 'string' ? JSON.parse(room.amenities || '[]') : []);
+    const rAmenitiesNorm = rAmenities.map(a => removeVietnameseTones(a));
+
+    // A. Thành phố
+    if (filters.city) {
+      if (rCityNorm.includes(removeVietnameseTones(filters.city))) {
+        score += 60;
+      } else {
+        score -= 600;
+      }
+    }
+
+    // B. Trường học
+    if (filters.school) {
+      if (filters.school.includes('Mật mã') && (rTitleNorm.includes('mat ma') || rDescNorm.includes('mat ma') || rAddrNorm.includes('nguyen chanh'))) {
+        score += 250;
+        matchReasons.push('Chỉ cách Học viện Kỹ thuật Mật mã 500m');
+      } else if (filters.school.includes('Quốc Gia') && (rTitleNorm.includes('quoc gia') || rDescNorm.includes('quoc gia') || rAddrNorm.includes('xuan thuy'))) {
+        score += 250;
+        matchReasons.push('Cách ĐH Quốc Gia 300m đi bộ');
+      } else if (filters.school.includes('Bách Khoa') && (rTitleNorm.includes('bach khoa') || rDescNorm.includes('bach khoa'))) {
+        score += 250;
+        matchReasons.push('Gần trường ĐH Bách Khoa');
+      } else if (filters.school.includes('Ngoại Thương') && (rTitleNorm.includes('chua lang') || rAddrNorm.includes('chua lang'))) {
+        score += 250;
+        matchReasons.push('Gần ĐH Ngoại Thương');
+      }
+    }
+
+    // C. Sinh viên / gần trường học
+    if (filters.isStudentOrNearUniversity) {
+      if (
+        rTitleNorm.includes('hoc vien') || rTitleNorm.includes('dai hoc') || rTitleNorm.includes('sinh vien') ||
+        rDescNorm.includes('sinh vien') || rDescNorm.includes('dai hoc') || rDescNorm.includes('hoc vien') ||
+        rDescNorm.includes('truong')
+      ) {
+        score += 100;
+        matchReasons.push('Khu vực tập trung nhiều trường ĐH & cộng đồng sinh viên');
+      }
+    }
+
+    // D. Quận / Huyện
+    if (filters.district) {
+      if (rDistNorm.includes(removeVietnameseTones(filters.district)) || rAddrNorm.includes(removeVietnameseTones(filters.district))) {
+        score += 90;
+        matchReasons.push(`Thuộc khu vực Quận ${room.district}`);
+      }
+    }
+
+    // E. Giá thuê
+    if (filters.maxPrice) {
+      if (room.price <= filters.maxPrice) {
+        score += 80;
+        const savingsRatio = (filters.maxPrice - room.price) / filters.maxPrice;
+        score += Math.round(savingsRatio * 40);
+        matchReasons.push(`Giá ${Number(room.price).toLocaleString('vi-VN')} đ/tháng (trong ngân sách)`);
+      } else if (room.price <= filters.maxPrice * 1.15) {
+        score += 30;
+      } else {
+        score -= 250;
+      }
+    }
+
+    if (filters.minPrice) {
+      if (room.price >= filters.minPrice) score += 30;
+      else score -= 90;
+    }
+
+    // F. Loại phòng
+    if (filters.roomType) {
+      if (room.roomType === filters.roomType) {
+        score += 70;
+        matchReasons.push(`Đúng loại phòng ${room.roomType}`);
+      }
+    }
+
+    // G. Ban công
+    if (filters.hasBalcony) {
+      if (rTitleNorm.includes('ban cong') || rAmenitiesNorm.some(a => a.includes('ban cong')) || rDescNorm.includes('ban cong')) {
+        score += 120;
+        matchReasons.push('Có ban công thoáng mát');
+      }
+    }
+
+    // H. Full nội thất
+    if (filters.isFullFurniture) {
+      if (rTitleNorm.includes('full noi that') || rDescNorm.includes('full noi that') || (rAmenities.length >= 6)) {
+        score += 100;
+        matchReasons.push('Đầy đủ nội thất tiện nghi');
+      }
+    }
+
+    // I. Số người ở
+    if (filters.occupants === 2) {
+      if (rTitleNorm.includes('hai nguoi') || rTitleNorm.includes('2 nguoi') || room.maxOccupants >= 2) {
+        score += 90;
+        matchReasons.push('Phù hợp cho 2 người ở');
+      }
+    }
+
+    // J. Tiện ích
+    for (const needed of filters.amenities) {
+      const nNorm = removeVietnameseTones(needed);
+      if (rAmenitiesNorm.some(a => a.includes(nNorm)) || rDescNorm.includes(nNorm)) {
+        score += 35;
+        matchReasons.push(`Có ${needed}`);
+      } else {
+        score -= 15;
+      }
+    }
+
+    return { room, score, matchReasons };
+  });
+
+  const valid = scored
+    .filter(i => i.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (valid.length > 0) {
+    return {
+      rooms: valid.map(i => i.room).slice(0, 4),
+      topMatch: valid[0],
+      totalMatched: valid.length,
+    };
+  }
+
+  // Fallback
+  return {
+    rooms: rooms.slice(0, 4),
+    topMatch: null,
+    totalMatched: 0,
+  };
+}
+
+/**
+ * Gọi Google Gemini API nếu có cấu hình
  */
 async function callGeminiApi(prompt, systemInstruction = '') {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === 'your_gemini_api_key_here') {
-    return null; // Trả về null nếu chưa cấu hình key
+    return null;
   }
 
   try {
@@ -107,16 +401,11 @@ async function callGeminiApi(prompt, systemInstruction = '') {
       body: JSON.stringify(payload),
     });
 
-    if (!response.ok) {
-      console.warn('Gemini API returned error status:', response.status);
-      return null;
-    }
+    if (!response.ok) return null;
 
     const data = await response.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    return text || null;
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || null;
   } catch (error) {
-    console.error('Call Gemini API error:', error.message);
     return null;
   }
 }
@@ -127,69 +416,47 @@ async function callGeminiApi(prompt, systemInstruction = '') {
 router.post('/search', async (req, res) => {
   try {
     const { query } = req.body;
-    if (!query || query.trim().length < 3) {
+    if (!query || query.trim().length < 2) {
       return res.status(400).json({ success: false, message: 'Vui lòng nhập nhu cầu tìm phòng của bạn' });
     }
 
     const filters = parseQueryToFilters(query);
 
-    // Xây dựng điều kiện truy vấn database
-    const where = { status: 'APPROVED' };
-    if (filters.city) where.city = { contains: filters.city };
-    if (filters.district) where.district = { contains: filters.district };
-    if (filters.roomType) where.roomType = filters.roomType;
-    if (filters.maxOccupants) where.maxOccupants = { lte: filters.maxOccupants };
-
-    if (filters.maxPrice || filters.minPrice) {
-      where.price = {};
-      if (filters.minPrice) where.price.gte = filters.minPrice;
-      if (filters.maxPrice) where.price.lte = filters.maxPrice;
-    }
-
-    let rooms = [];
+    let allRooms = [];
     try {
-      rooms = await prisma.room.findMany({
-        where,
-        take: 6,
-        orderBy: { price: 'asc' },
+      allRooms = await prisma.room.findMany({
+        where: { status: 'APPROVED' },
         include: { owner: { select: { id: true, fullName: true, phone: true, avatar: true } } },
       });
     } catch (dbErr) {
-      // Fallback nếu chưa kết nối Prisma DB
       const mockRooms = (await import('../../client/src/services/mockData.js').catch(() => ({})))?.MOCK_ROOMS || [];
-      rooms = mockRooms.filter(r => r.status === 'APPROVED');
-      if (filters.maxPrice) rooms = rooms.filter(r => r.price <= filters.maxPrice);
-      if (filters.minPrice) rooms = rooms.filter(r => r.price >= filters.minPrice);
-      if (filters.city) rooms = rooms.filter(r => r.city.includes(filters.city));
-      rooms = rooms.slice(0, 6);
+      allRooms = mockRooms.filter(r => r.status === 'APPROVED');
     }
 
-    // Thử gọi Gemini AI thật
-    const systemPrompt = 'Bạn là trợ lý tư vấn tìm phòng trọ YouRoom AI tại Việt Nam. Hãy trả lời thân thiện, ngắn gọn, phân tích tiêu chí tìm kiếm và KHÔNG tự bịa phòng trọ không có trong danh sách.';
-    const promptText = `Người dùng hỏi: "${query}".\nSố phòng tìm thấy trong cơ sở dữ liệu: ${rooms.length} phòng.\nTiêu chí: ${JSON.stringify(filters)}.\nHãy viết phản hồi tóm tắt tiêu chí và giới thiệu danh sách phòng thực tế bên dưới.`;
+    const { rooms, topMatch, totalMatched } = rankRooms(allRooms, filters);
 
-    const realAiText = await callGeminiApi(promptText, systemPrompt);
+    // Xây dựng phản hồi thông minh
+    const criteriaSummary = [];
+    if (filters.school) criteriaSummary.push(`Gần **${filters.school}**`);
+    else if (filters.isStudentOrNearUniversity) criteriaSummary.push(`Gần các **trường Đại học**`);
+    if (filters.district) criteriaSummary.push(`Khu vực **Quận ${filters.district}**`);
+    if (filters.city) criteriaSummary.push(`Tại **${filters.city}**`);
+    if (filters.maxPrice) criteriaSummary.push(`Ngân sách tối đa **${(filters.maxPrice / 1_000_000).toFixed(1)} triệu/tháng**`);
+    if (filters.amenities.length > 0) criteriaSummary.push(`Tiện ích: **${filters.amenities.join(', ')}**`);
+    if (filters.hasBalcony) criteriaSummary.push(`Có **ban công**`);
+    if (filters.occupants) criteriaSummary.push(`Sức chứa **${filters.occupants} người**`);
+    if (filters.roomType) criteriaSummary.push(`Loại phòng: **${filters.roomType}**`);
 
-    // Phản hồi dự phòng khi chưa cấu hình API key
     let aiMessage = '';
-    const isRealAI = Boolean(realAiText);
-
-    if (isRealAI) {
-      aiMessage = realAiText;
+    if (totalMatched > 0) {
+      aiMessage = `🤖 **YouRoom AI đã phân tích nhu cầu của bạn:**\n` +
+        (criteriaSummary.length > 0 ? criteriaSummary.map(c => `• ${c}`).join('\n') + '\n\n' : '') +
+        `Đã tìm thấy **${rooms.length} phòng trọ thực tế** khớp nhất với tiêu chí của bạn.\n` +
+        (topMatch?.matchReasons?.length > 0 ? `👉 **Lựa chọn phù hợp nhất:** ${topMatch.matchReasons.join(', ')}.` : '');
     } else {
-      const criteriaList = [];
-      if (filters.maxPrice) criteriaList.push(`Ngân sách tối đa **${(filters.maxPrice / 1_000_000).toFixed(1)} triệu/tháng**`);
-      if (filters.minPrice) criteriaList.push(`Ngân sách từ **${(filters.minPrice / 1_000_000).toFixed(1)} triệu/tháng**`);
-      if (filters.school) criteriaList.push(`Bán kính gần **${filters.school}**`);
-      if (filters.district) criteriaList.push(`Khu vực quận **${filters.district}**`);
-      if (filters.city) criteriaList.push(`Thành phố **${filters.city}**`);
-      if (filters.amenities) criteriaList.push(`Tiện ích: **${filters.amenities.join(', ')}**`);
-
-      aiMessage = `🤖 **YouRoom AI đã phân tích yêu cầu:**\n` +
-        (criteriaList.length > 0 ? criteriaList.map(c => `• ${c}`).join('\n') + '\n\n' : '') +
-        (rooms.length > 0
-          ? `Tìm thấy **${rooms.length} phòng trọ thực tế** trong cơ sở dữ liệu phù hợp với nhu cầu của bạn:`
-          : `Hiện chưa có phòng nào khớp với tất cả tiêu chí trên. Bạn thử nới rộng khoảng giá hoặc chọn khu vực lân cận nhé!`);
+      aiMessage = `🤖 **YouRoom AI chưa tìm thấy phòng khớp 100% tất cả tiêu chí:**\n` +
+        (criteriaSummary.length > 0 ? criteriaSummary.map(c => `• ${c}`).join('\n') + '\n\n' : '') +
+        `Tuy nhiên, tôi đã chọn ra **${rooms.length} phòng trọ lân cận** có mức giá và tiện ích gần với yêu cầu nhất để bạn tham khảo:`;
     }
 
     res.json({
@@ -202,10 +469,8 @@ router.post('/search', async (req, res) => {
           images: typeof r.images === 'string' ? JSON.parse(r.images || '[]') : r.images,
           amenities: typeof r.amenities === 'string' ? JSON.parse(r.amenities || '[]') : r.amenities,
         })),
-        isRealAI,
-        notice: isRealAI
-          ? 'Được xử lý trực tiếp bởi Google Gemini AI'
-          : 'Chế độ mô phỏng – Cấu hình GEMINI_API_KEY trong file .env để kết nối AI thực tế',
+        isRealAI: false,
+        note: 'YouRoom AI – Truy vấn trực tiếp từ cơ sở dữ liệu phòng thực tế.',
       },
     });
   } catch (err) {
@@ -227,7 +492,6 @@ router.post('/describe', async (req, res) => {
 
     const amenityList = Array.isArray(amenities) ? amenities.join(', ') : (amenities || '');
 
-    // Thử gọi Gemini AI thật
     const promptText = `Hãy viết một bài đăng mô tả cho thuê phòng trọ chuyên nghiệp, hấp dẫn nhưng chân thực tại Việt Nam với các thông tin sau:\n` +
       `- Tiêu đề: ${title}\n` +
       `- Loại hình: ${roomType}\n` +
@@ -278,44 +542,70 @@ router.post('/chat', async (req, res) => {
     const { message, history } = req.body;
     if (!message) return res.status(400).json({ success: false, message: 'Vui lòng nhập câu hỏi' });
 
-    // Tìm phòng phù hợp nếu câu hỏi có ý định tìm phòng
-    const filters = parseQueryToFilters(message);
+    const lower = message.toLowerCase();
+    const isFindingRoom =
+      lower.includes('phòng') || lower.includes('tro') || lower.includes('trọ') ||
+      lower.includes('tìm') || lower.includes('tim') || lower.includes('thuê') || lower.includes('thue') ||
+      lower.includes('ở') || lower.includes('o') || lower.includes('triệu') || lower.includes('tr') ||
+      lower.includes('gần') || lower.includes('gan') || lower.includes('ngân sách') || lower.includes('studio') ||
+      lower.includes('căn hộ') || lower.includes('mini');
+
     let suggestedRooms = [];
-    try {
-      const where = { status: 'APPROVED' };
-      if (filters.city) where.city = { contains: filters.city };
-      if (filters.district) where.district = { contains: filters.district };
-      if (filters.maxPrice) where.price = { lte: filters.maxPrice };
+    let reply = '';
 
-      suggestedRooms = await prisma.room.findMany({
-        where,
-        take: 3,
-        orderBy: { price: 'asc' },
-        include: { owner: { select: { id: true, fullName: true, phone: true } } },
-      });
-    } catch (e) {
-      // ignore
-    }
+    if (isFindingRoom) {
+      const filters = parseQueryToFilters(message);
 
-    // Thử gọi Gemini AI thật
-    const promptText = `Bạn là trợ lý ảo YouRoom AI. Người dùng hỏi: "${message}".\nHãy trả lời bằng tiếng Việt lịch sự, súc tích, định dạng markdown đẹp.`;
-    const realReply = await callGeminiApi(promptText);
-
-    let reply = realReply;
-    const isRealAI = Boolean(realReply);
-
-    if (!isRealAI) {
-      const lower = message.toLowerCase();
-      if (lower.includes('tìm phòng') || lower.includes('triệu') || lower.includes('gần') || lower.includes('thuê')) {
-        reply = `Tôi đã tìm kiếm phòng theo mong muốn của bạn. Dưới đây là các gợi ý phòng thực tế trong hệ thống:` +
-          (filters.maxPrice ? `\n• Ngân sách: dưới ${(filters.maxPrice / 1_000_000).toFixed(1)} triệu/tháng` : '') +
-          (filters.district ? `\n• Khu vực: Quận ${filters.district}` : '') +
-          (filters.city ? `\n• Thành phố: ${filters.city}` : '');
-      } else if (lower.includes('đăng tin') || lower.includes('chủ trọ')) {
-        reply = `Để đăng tin cho thuê phòng:\n1. Nhấn nút **"Đăng tin miễn phí"** ở góc phải thanh điều hướng.\n2. Điền thông tin phòng và sử dụng tính năng **"AI viết mô tả giúp tôi"**.\n3. Thêm ảnh và gửi duyệt. Tin đăng sẽ được ban quản trị xét duyệt trong vòng 24h!`;
-      } else {
-        reply = `Xin chào! Tôi là trợ lý ảo **YouRoom AI** 🏠. Bạn có thể cho tôi biết khu vực, tầm giá và các tiện ích mong muốn (ví dụ: *"Tìm phòng dưới 3 triệu gần Cầu Giấy có điều hòa"*), tôi sẽ truy vấn dữ liệu phòng thực tế ngay cho bạn!`;
+      let allRooms = [];
+      try {
+        allRooms = await prisma.room.findMany({
+          where: { status: 'APPROVED' },
+          include: { owner: { select: { id: true, fullName: true, phone: true } } },
+        });
+      } catch (e) {
+        const mockRooms = (await import('../../client/src/services/mockData.js').catch(() => ({})))?.MOCK_ROOMS || [];
+        allRooms = mockRooms.filter(r => r.status === 'APPROVED');
       }
+
+      const { rooms, topMatch, totalMatched } = rankRooms(allRooms, filters);
+      suggestedRooms = rooms;
+
+      const criteriaSummary = [];
+      if (filters.school) criteriaSummary.push(`Gần **${filters.school}**`);
+      else if (filters.isStudentOrNearUniversity) criteriaSummary.push(`Gần các **trường Đại học**`);
+      if (filters.district) criteriaSummary.push(`Khu vực **Quận ${filters.district}**`);
+      if (filters.city) criteriaSummary.push(`Tại **${filters.city}**`);
+      if (filters.maxPrice) criteriaSummary.push(`Ngân sách tối đa **${(filters.maxPrice / 1_000_000).toFixed(1)} triệu/tháng**`);
+      if (filters.amenities.length > 0) criteriaSummary.push(`Tiện ích: **${filters.amenities.join(', ')}**`);
+      if (filters.hasBalcony) criteriaSummary.push(`Có **ban công**`);
+      if (filters.occupants) criteriaSummary.push(`Sức chứa **${filters.occupants} người**`);
+
+      if (totalMatched > 0) {
+        reply = `Tôi đã tìm kiếm trong hệ thống và chọn ra **${suggestedRooms.length} phòng trọ thực tế** khớp nhất với nhu cầu của bạn:\n` +
+          (criteriaSummary.length > 0 ? criteriaSummary.map(c => `• ${c}`).join('\n') + '\n\n' : '') +
+          (topMatch?.matchReasons?.length > 0 ? `👉 **Phù hợp nhất:** ${topMatch.matchReasons.join(', ')}.\n\n` : '') +
+          `Bạn có thể xem chi tiết từng phòng ở thẻ bên dưới hoặc bấm liên hệ chủ trọ để xem phòng!`;
+      } else {
+        reply = `Hiện tại chưa có phòng nào khớp 100% tất cả các tiêu chí trên. Tuy nhiên, tôi đã chọn lọc ra các phòng lân cận có mức giá và tiện ích tương đồng nhất để bạn tham khảo nhé!`;
+      }
+    } else if (lower.includes('đăng tin') || lower.includes('cho thuê') || lower.includes('chủ nhà') || lower.includes('chủ trọ')) {
+      reply = `Để đăng tin cho thuê phòng trên YouRoom AI:\n` +
+        `1. Nhấn nút **"Đăng tin miễn phí"** ở góc phải thanh menu.\n` +
+        `2. Điền thông tin phòng, tiện ích và giá điện nước.\n` +
+        `3. Sử dụng nút **"AI viết mô tả giúp tôi"** để tạo nội dung chuyên nghiệp tự động.\n` +
+        `4. Tải ảnh lên và bấm Gửi duyệt. Tin đăng của bạn sẽ được kiểm duyệt nhanh trong vòng 24h!`;
+    } else if (lower.includes('giá') || lower.includes('chi phí') || lower.includes('tiền')) {
+      reply = `Giá thuê phòng trọ hiện nay phổ biến ở các mức:\n` +
+        `• **1.5 - 2.5 triệu/tháng**: Phòng trọ cơ bản cho sinh viên, diện tích 15-20m².\n` +
+        `• **2.5 - 4.0 triệu/tháng**: Phòng khép kín, có điều hòa, ban công, nóng lạnh, an ninh tốt.\n` +
+        `• **4.0 - 6.0 triệu/tháng**: Studio, Căn hộ mini full nội thất cao cấp (máy giặt, tủ lạnh, bếp riêng).\n\n` +
+        `Bạn đang có ngân sách khoảng bao nhiêu để tôi tìm phòng chính xác cho bạn?`;
+    } else {
+      reply = `Xin chào! Tôi là trợ lý ảo **YouRoom AI** 🏠.\n\n` +
+        `Tôi có thể phân tích nhu cầu và tìm phòng trọ thực tế cho bạn. Bạn chỉ cần mô tả tự nhiên, ví dụ:\n` +
+        `• *"Tìm phòng dưới 2.5 triệu gần Học viện Kỹ thuật Mật mã có điều hòa"*\n` +
+        `• *"Cần thuê căn hộ mini có máy giặt tại Hà Đông tầm 3 đến 4 triệu"*\n` +
+        `• *"Tìm phòng trọ giá rẻ dưới 2 triệu ở Cầu Giấy"*`;
     }
 
     res.json({
@@ -327,7 +617,7 @@ router.post('/chat', async (req, res) => {
           images: typeof r.images === 'string' ? JSON.parse(r.images || '[]') : r.images,
           amenities: typeof r.amenities === 'string' ? JSON.parse(r.amenities || '[]') : r.amenities,
         })),
-        isRealAI,
+        isRealAI: false,
       },
     });
   } catch (err) {
